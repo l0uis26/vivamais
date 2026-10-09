@@ -338,6 +338,26 @@ input,select{font-family:inherit;font-size:16px;}
 <!-- container de toasts -->
 <div id="toast-wrap"></div>
 </div>
+
+<!-- =========================================================
+     CONFIGURAÇÃO DO BACKEND (Firebase)  —  COLE SUAS CHAVES AQUI
+     -----------------------------------------------------------
+     • Deixe apiKey vazio ("") para rodar em MODO OFFLINE (só localStorage).
+     • Preencha com os dados do SEU projeto Firebase para ativar
+       amigos e ranking REAIS (funciona 100% no GitHub Pages).
+     • Onde pegar: console.firebase.google.com → seu projeto →
+       ⚙️ Configurações → "Seus apps" → Config do SDK.
+     ========================================================= -->
+<script>
+window.VIVA_FIREBASE = {
+  apiKey:            "",   // ex: "AIzaSyXXXXXXXXXXXXXXXXXXXXXXXX"
+  authDomain:        "",   // ex: "seu-projeto.firebaseapp.com"
+  projectId:         "",   // ex: "seu-projeto"
+  storageBucket:     "",   // ex: "seu-projeto.appspot.com"
+  messagingSenderId: "",   // ex: "123456789012"
+  appId:             ""    // ex: "1:123...:web:abc..."
+};
+</script>
 <script>
 /* =========================================================
    VIVA+  —  LÓGICA DA APLICAÇÃO
@@ -357,14 +377,46 @@ let S = null;            // objeto de estado do usuário
 const onb = {};          // dados temporários do onboarding
 let etapaAtual = 0;      // etapa atual do onboarding (0..5)
 
+/* ---------- Camada de nuvem (backend) ----------
+   CLOUD.api  → preenchido quando o Firebase conecta (ver adaptador no fim).
+   CLOUD.ranking → ranking global em tempo real (lista de usuários reais).
+   Enquanto não houver backend configurado, o app funciona 100% offline. */
+const CLOUD = { api:null, pronto:false, ranking:[] };
+
+/* Chamado pelo adaptador Firebase assim que a nuvem conecta. */
+window.vivaAoConectar = (api)=>{
+  CLOUD.api = api; CLOUD.pronto = true;
+  if(S && S.perfil && S.perfil.nome) salvar();   // registra você no ranking
+  if(S && S.perfil) renderCompetir();
+};
+/* Chamado pelo adaptador sempre que o ranking global muda (tempo real). */
+window.vivaRanking = (arr)=>{
+  CLOUD.ranking = Array.isArray(arr) ? arr : [];
+  if(S && S.perfil && document.getElementById('principal').style.display!=='none'){
+    renderCompetir(); renderAmigos();
+  }
+};
+
 /* ---------- Utilitários ---------- */
 const $ = (s,el=document)=>el.querySelector(s);
 const $$ = (s,el=document)=>[...el.querySelectorAll(s)];
 const hoje = ()=> new Date().toISOString().slice(0,10); // 'AAAA-MM-DD'
 
-/* Salva o estado no localStorage. [BACKEND] aqui também sincronizaria
-   com o servidor (ex: setDoc no Firestore / upsert no Supabase). */
-function salvar(){ localStorage.setItem(KEY, JSON.stringify(S)); }
+/* Salva o estado no localStorage e sincroniza com a nuvem (se conectada).
+   [BACKEND] a sincronização remota acontece aqui (Firestore). */
+function salvar(){
+  localStorage.setItem(KEY, JSON.stringify(S));
+  // Espelha seus dados públicos no ranking global (nome, avatar, pontos).
+  if(CLOUD.api && S && S.perfil && S.perfil.nome){
+    CLOUD.api.salvarUsuario({
+      codigo: S.codigo,
+      nome:   S.perfil.nome,
+      ava:    avatarUser(),
+      pontos: S.pontosTotais,
+      obj:    S.perfil.obj
+    }).catch(()=>{}); // falha de rede não quebra o app (segue offline)
+  }
+}
 
 /* Carrega o estado do localStorage. */
 function carregar(){
@@ -930,11 +982,27 @@ function toggleHabito(id){
 
 /* --- Tela Competir: pódio + ranking --- */
 function renderCompetir(){
-  // Monta a lista: usuário + bots + amigos adicionados.
-  // [BACKEND] no futuro, esta lista virá do servidor (ranking real).
-  let lista = BOTS.map(b=>({ nome:b.nome, ava:b.ava, pontos:b.base, rival:b.rival, bot:true }));
-  lista.push({ nome:S.perfil.nome+' (você)', ava:avatarUser(), pontos:S.pontosTotais, eu:true });
-  S.amigos.forEach(a=>lista.push({ nome:a.nome, ava:a.ava, pontos:a.pontos, amigo:true }));
+  let lista;
+  if(CLOUD.pronto && CLOUD.ranking.length){
+    // ===== RANKING REAL (usuários de verdade vindos do Firestore) =====
+    const meuCod = S.codigo;
+    const amigosCods = new Set(S.amigos.map(a=>a.codigo));
+    lista = CLOUD.ranking.map(u=>({
+      nome:   (u.codigo===meuCod) ? (S.perfil.nome+' (você)') : (u.nome||'Anônimo'),
+      ava:    u.ava || '🙂',
+      pontos: u.pontos || 0,
+      eu:     u.codigo===meuCod,
+      amigo:  amigosCods.has(u.codigo),
+    }));
+    // garante que você apareça mesmo antes do primeiro sync
+    if(!lista.some(u=>u.eu))
+      lista.push({ nome:S.perfil.nome+' (você)', ava:avatarUser(), pontos:S.pontosTotais, eu:true });
+  } else {
+    // ===== MODO OFFLINE: bots fictícios + você + amigos locais =====
+    lista = BOTS.map(b=>({ nome:b.nome, ava:b.ava, pontos:b.base, rival:b.rival }));
+    lista.push({ nome:S.perfil.nome+' (você)', ava:avatarUser(), pontos:S.pontosTotais, eu:true });
+    S.amigos.forEach(a=>lista.push({ nome:a.nome, ava:a.ava, pontos:a.pontos, amigo:true }));
+  }
   // ordena por pontos (desc)
   lista.sort((a,b)=>b.pontos-a.pontos);
 
@@ -954,7 +1022,7 @@ function renderCompetir(){
     </div>`;
   }).join('');
 
-  // --- Lista completa (a partir do 4º, + sempre mostra você) ---
+  // --- Lista completa ---
   $('#rankLista').innerHTML = lista.map((u,i)=>{
     const tag = u.eu?'' : u.rival?'<span class="tag-rival">RIVAL</span>' : u.amigo?'<span class="tag-amigo">AMIGO</span>':'';
     return `<div class="rank-item ${u.eu?'eu':''}">
@@ -974,6 +1042,13 @@ function avatarUser(){
 /* --- Tela Amigos: código próprio, adicionar e listar --- */
 function renderAmigos(){
   $('#meuCodigo').textContent = S.codigo;
+  // Atualiza os pontos dos amigos com os dados ao vivo do ranking (se houver).
+  if(CLOUD.pronto && CLOUD.ranking.length){
+    S.amigos.forEach(a=>{
+      const r = CLOUD.ranking.find(u=>u.codigo===a.codigo);
+      if(r){ a.pontos = r.pontos||0; a.nome = r.nome||a.nome; a.ava = r.ava||a.ava; }
+    });
+  }
   const l = $('#listaAmigos');
   if(S.amigos.length===0){
     l.innerHTML = '<p class="mini" style="padding:4px 2px;">Nenhum amigo ainda. Compartilhe seu código! 🙌</p>';
@@ -995,23 +1070,33 @@ $('#btnCopiar').onclick = ()=>{
 };
 
 /* Adicionar amigo pelo código.
-   [BACKEND] aqui faria uma busca real no servidor pelo código informado
-   e traria nome/avatar/pontos reais. Por enquanto simulamos localmente. */
-$('#btnAddAmigo').onclick = ()=>{
+   [BACKEND] com Firebase conectado, busca o usuário REAL pelo código.
+   Sem backend, cai no modo simulado (perfil aleatório local). */
+$('#btnAddAmigo').onclick = async ()=>{
   let cod = ($('#inpAmigo').value||'').trim().toUpperCase();
   if(!cod.startsWith('VIVA-')) cod = 'VIVA-'+cod.replace('VIVA-','');
   if(!/^VIVA-[A-Z0-9]{4}$/.test(cod)){ toast('Código inválido 🤔'); return; }
   if(cod===S.codigo){ toast('Esse é o seu próprio código 😄'); return; }
   if(S.amigos.some(a=>a.codigo===cod)){ toast('Vocês já são amigos 😉'); return; }
-  // simulação: nome e pontos aleatórios
-  const avatars=['😎','🌸','🚀','⚡','🌟','🎯','🦄','🏀'];
-  const nomes=['Alex','Sam','Jô','Kai','Nina','Lu','Max','Vic'];
-  S.amigos.push({
-    codigo:cod,
-    nome:nomes[Math.floor(Math.random()*nomes.length)],
-    ava:avatars[Math.floor(Math.random()*avatars.length)],
-    pontos:Math.floor(Math.random()*300)+50,
-  });
+
+  if(CLOUD.pronto && CLOUD.api){
+    // ----- BUSCA REAL no Firestore -----
+    toast('Procurando... 🔍');
+    let achado = null;
+    try{ achado = await CLOUD.api.buscarPorCodigo(cod); }catch(e){ toast('Erro de conexão 📡'); return; }
+    if(!achado){ toast('Ninguém com esse código 🙅'); return; }
+    S.amigos.push({ codigo:achado.codigo, nome:achado.nome, ava:achado.ava, pontos:achado.pontos, uid:achado.uid });
+  } else {
+    // ----- MODO OFFLINE: simulação local -----
+    const avatars=['😎','🌸','🚀','⚡','🌟','🎯','🦄','🏀'];
+    const nomes=['Alex','Sam','Jô','Kai','Nina','Lu','Max','Vic'];
+    S.amigos.push({
+      codigo:cod,
+      nome:nomes[Math.floor(Math.random()*nomes.length)],
+      ava:avatars[Math.floor(Math.random()*avatars.length)],
+      pontos:Math.floor(Math.random()*300)+50,
+    });
+  }
   salvar();
   $('#inpAmigo').value='';
   toast('Amigo adicionado! 🎉','ok');
@@ -1088,6 +1173,66 @@ function init(){
   }
 }
 init();
+</script>
+
+<!-- =========================================================
+     ADAPTADOR FIREBASE (backend real)
+     -----------------------------------------------------------
+     • Só ativa se window.VIVA_FIREBASE.apiKey estiver preenchido.
+     • Usa login anônimo (cada aparelho vira um usuário único).
+     • Grava seu perfil público em 'usuarios/{uid}' e escuta o
+       ranking global (top 50) em tempo real.
+     • Carregado via CDN oficial do Firebase (ES modules).
+     ========================================================= -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+import { getFirestore, doc, setDoc, serverTimestamp, collection,
+         query, where, getDocs, orderBy, limit, onSnapshot }
+  from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+
+const cfg = window.VIVA_FIREBASE || {};
+if (cfg && cfg.apiKey) {
+  try {
+    const app  = initializeApp(cfg);
+    const auth = getAuth(app);
+    const db   = getFirestore(app);
+    const cred = await signInAnonymously(auth);  // identidade única por aparelho
+    const uid  = cred.user.uid;
+
+    // API exposta para o app principal (ver window.vivaAoConectar).
+    const api = {
+      uid,
+      // Grava/atualiza seu perfil público (merge não apaga outros campos).
+      async salvarUsuario(d){
+        await setDoc(doc(db,'usuarios',uid),
+          { ...d, uid, atualizadoEm: serverTimestamp() }, { merge:true });
+      },
+      // Busca um usuário real pelo código VIVA-XXXX.
+      async buscarPorCodigo(cod){
+        const q = query(collection(db,'usuarios'), where('codigo','==',cod));
+        const s = await getDocs(q);
+        if (s.empty) return null;
+        const d = s.docs[0].data();
+        return { uid:d.uid, nome:d.nome, ava:d.ava, pontos:d.pontos||0, codigo:d.codigo };
+      }
+    };
+
+    // Ranking global em tempo real (top 50 por pontos).
+    const rq = query(collection(db,'usuarios'), orderBy('pontos','desc'), limit(50));
+    onSnapshot(rq, snap => {
+      const arr = snap.docs.map(x => x.data());
+      if (window.vivaRanking) window.vivaRanking(arr);
+    });
+
+    if (window.vivaAoConectar) window.vivaAoConectar(api);
+    console.log('[Viva+] ☁️ Nuvem conectada. Seu uid:', uid);
+  } catch (e) {
+    console.warn('[Viva+] Falha ao conectar no Firebase (seguindo offline):', e);
+  }
+} else {
+  console.log('[Viva+] Modo offline — preencha window.VIVA_FIREBASE para ativar o online real.');
+}
 </script>
 </body>
 </html>
